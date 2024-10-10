@@ -92,19 +92,15 @@ Do you prefer to use Kruskal or Prim for MST computation?
 
 Enter the number of vertices and edges for the graph:
 
-lua
 
 Please write the amount of vertices and edges that you want in the graph (format: vertices edges):
 
 Add the edges:
 
-java
-
 Enter the edges (format: u v weight):
 
 Choose the MST operation (e.g., total weight, longest distance):
 
-markdown
 
     Please choose an operation:
     1. Total weight of the MST
