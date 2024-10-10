@@ -42,13 +42,9 @@ Installation
 
 Build the project:
 
-bash
-
     make all
 
 Run the server:
-
-bash
 
     ./server
 
@@ -60,22 +56,19 @@ Example Commands
     Choose MST Algorithm:
         Clients can select between Prim's or Kruskal's MST algorithm:
 
-bash
 
-    kruskal
+    kruskal /
     prim
 
 Graph Input:
 
     Specify the number of vertices and edges:
 
-bash
 
 5 7
 
 Add edges by specifying the two vertices and the weight:
 
-bash
 
         1 2 10
 
