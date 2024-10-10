@@ -1,0 +1,455 @@
+        -:    0:Source:Server.cpp
+        -:    0:Graph:Server.gcno
+        -:    0:Data:Server.gcda
+        -:    0:Runs:5
+        -:    1:#include <iostream>
+        -:    2:#include <string>
+        -:    3:#include <sstream>
+        -:    4:#include <cstring>
+        -:    5:#include <cstdlib>
+        -:    6:#include <thread>
+        -:    7:#include <mutex>
+        -:    8:#include <unordered_map>
+        -:    9:#include <vector>
+        -:   10:#include <list>
+        -:   11:#include <queue>
+        -:   12:#include <functional>
+        -:   13:#include <algorithm>
+        -:   14:#include <chrono>
+        -:   15:#include <signal.h> // Include signal handling
+        -:   16:#include <netinet/in.h>
+        -:   17:#include <arpa/inet.h>
+        -:   18:#include <unistd.h>
+        -:   19:#include "Graph.h"
+        -:   20:#include "MSTFactory.h"
+        -:   21:#include "ActiveObject.h"
+        -:   22:#include "ThreadPool.h"
+        -:   23:
+        -:   24:#define PORT 9034
+        -:   25:#define MAX_CLIENTS 100
+        -:   26:
+        -:   27:std::mutex cout_mutex;
+        -:   28:
+        -:   29:// Declare listener_fd globally
+        -:   30:int listener_fd = -1;
+        -:   31:
+        -:   32:// Signal handler function
+        5:   33:void signal_handler(int signal) {
+        5:   34:    if (signal == SIGTERM || signal == SIGINT) { // Include SIGINT
+        5:   35:        if (listener_fd >= 0) {
+        5:   36:            close(listener_fd); // Close the listener socket
+        5:   37:            listener_fd = -1;   // Set to -1 to indicate it's closed
+        -:   38:        }
+        -:   39:    }
+        5:   40:}
+        -:   41:
+        -:   42:// Helper function to read a line from the socket
+       40:   43:std::string recv_line(int sock) {
+       40:   44:    std::string line;
+        -:   45:    char c;
+        -:   46:    while (true) {
+      125:   47:        int bytes_received = recv(sock, &c, 1, 0);
+      125:   48:        if (bytes_received <= 0) {
+        -:   49:            // Connection closed or error
+        2:   50:            return "";
+        -:   51:        }
+      123:   52:        if (c == '\n') {
+    #####:   53:            break;
+      123:   54:        } else if (c == '\r') {
+        -:   55:            // Peek ahead to see if next char is '\n'
+       38:   56:            int peek_bytes = recv(sock, &c, 1, MSG_PEEK);
+       38:   57:            if (peek_bytes > 0 && c == '\n') {
+        -:   58:                // Consume the '\n'
+       38:   59:                recv(sock, &c, 1, 0);
+        -:   60:            }
+       38:   61:            break;
+        -:   62:        }
+       85:   63:        line += c;
+       85:   64:    }
+       38:   65:    return line;
+       40:   66:}
+        -:   67:
+        -:   68:// Function to handle each client connection
+        7:   69:void handle_client(int client_sock, ActiveObject& ao) {
+        7:   70:    std::string response;
+        7:   71:    Graph* graph = Graph::getInstance();
+        7:   72:    MSTType mstType = MSTType::KRUSKAL; // Default MST algorithm
+        -:   73:
+        -:   74:    // Send initial message to client asking for algorithm preference
+        7:   75:    response = "Do you prefer to use Kruskal or Prim for MST computation?\n";
+        7:   76:    send(client_sock, response.c_str(), response.length(), 0);
+        -:   77:
+        -:   78:    // Wait for client's response
+        7:   79:    std::string cmd = recv_line(client_sock);
+        7:   80:    if (cmd.empty()) {
+        1:   81:        close(client_sock);
+        1:   82:        return;
+        -:   83:    }
+        -:   84:    // Remove carriage return and newline characters
+        6:   85:    cmd.erase(std::remove_if(cmd.begin(), cmd.end(),
+      24*:   86:        [](unsigned char x){ return x == '\r' || x == '\n'; }), cmd.end());
+        -:   87:    // Convert cmd to lowercase
+        6:   88:    std::transform(cmd.begin(), cmd.end(), cmd.begin(), ::tolower);
+        -:   89:
+        6:   90:    if (cmd == "kruskal") {
+        1:   91:        mstType = MSTType::KRUSKAL;
+        1:   92:        response = "MST algorithm set to Kruskal.\n";
+        5:   93:    } else if (cmd == "prim") {
+        2:   94:        mstType = MSTType::PRIM;
+        2:   95:        response = "MST algorithm set to Prim.\n";
+        -:   96:    } else {
+        3:   97:        response = "Unknown MST algorithm. Defaulting to Kruskal.\n";
+        3:   98:        mstType = MSTType::KRUSKAL;
+        -:   99:    }
+        6:  100:    send(client_sock, response.c_str(), response.length(), 0);
+        -:  101:
+        -:  102:    // Main loop
+        -:  103:    while (true) {
+        -:  104:        // Check if graph exists
+       17:  105:        bool graph_exists = graph->getVertices() > 0;
+        -:  106:
+       17:  107:        if (!graph_exists) {
+        -:  108:            // Ask for number of vertices and edges
+        5:  109:            response = "Please write the amount of vertices and edges that you want in the graph (format: vertices edges):\n";
+        5:  110:            send(client_sock, response.c_str(), response.length(), 0);
+        -:  111:
+        -:  112:            // Wait for client's response
+        5:  113:            cmd = recv_line(client_sock);
+        5:  114:            if (cmd.empty()) {
+        2:  115:                close(client_sock);
+        2:  116:                return;
+        -:  117:            }
+        -:  118:            // Remove carriage return and newline characters
+        3:  119:            cmd.erase(std::remove_if(cmd.begin(), cmd.end(),
+      12*:  120:                [](unsigned char x){ return x == '\r' || x == '\n'; }), cmd.end());
+        -:  121:            // Replace commas with spaces
+        3:  122:            std::replace(cmd.begin(), cmd.end(), ',', ' ');
+        -:  123:
+        3:  124:            std::stringstream ss(cmd);
+        -:  125:            int v, e;
+        3:  126:            ss >> v >> e;
+        -:  127:
+        -:  128:            // Send the prompt to the client
+        3:  129:            response = "Enter the edges (format: u v weight):\n";
+        3:  130:            send(client_sock, response.c_str(), response.length(), 0);
+        -:  131:
+        -:  132:            // Read edges from client
+        3:  133:            std::vector<std::tuple<int, int, int>> edges;
+        9:  134:            for (int i = 0; i < e; ++i) {
+        6:  135:                std::string edge_cmd = recv_line(client_sock);
+        6:  136:                if (edge_cmd.empty()) {
+    #####:  137:                    close(client_sock);
+    #####:  138:                    return;
+        -:  139:                }
+        -:  140:                // Remove carriage return and newline characters
+        6:  141:                edge_cmd.erase(std::remove_if(edge_cmd.begin(), edge_cmd.end(),
+      36*:  142:                    [](unsigned char x){ return x == '\r' || x == '\n'; }), edge_cmd.end());
+        -:  143:                // Replace commas with spaces
+        6:  144:                std::replace(edge_cmd.begin(), edge_cmd.end(), ',', ' ');
+        -:  145:
+        6:  146:                std::stringstream edge_ss(edge_cmd);
+        -:  147:                int u, v_edge, w;
+        6:  148:                edge_ss >> u >> v_edge >> w;
+        6:  149:                edges.emplace_back(u, v_edge, w);
+        6:  150:            }
+        -:  151:
+        -:  152:            // Function to create the new graph
+        3:  153:            ao.send([v, e, edges, &response, graph]() mutable {
+        3:  154:                graph->newGraph(v, e);
+        9:  155:                for (const auto& edge : edges) {
+        6:  156:                    int u = std::get<0>(edge);
+        6:  157:                    int v_edge = std::get<1>(edge);
+        6:  158:                    int w = std::get<2>(edge);
+        6:  159:                    graph->newEdge(u, v_edge, w);
+        -:  160:                }
+        3:  161:                response = "Graph created successfully.\n";
+        3:  162:            });
+        -:  163:
+        -:  164:            // Wait a moment for the graph to be created
+        3:  165:            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        -:  166:
+        -:  167:            // Function to calculate and create the MST object
+       3*:  168:            ao.send([&response, graph, mstType]() mutable {
+        3:  169:                auto mstSolver = MSTFactory::createMST(mstType, *graph);
+        3:  170:                if (mstSolver) {
+        3:  171:                    mstSolver->solve(); // Ensure MST is calculated
+        3:  172:                    response = "MST calculated successfully.\n";
+        -:  173:                } else {
+    #####:  174:                    response = "Failed to calculate MST.\n";
+        -:  175:                }
+        3:  176:            });
+        -:  177:
+        -:  178:            // Wait a moment for the MST to be calculated
+        3:  179:            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        -:  180:
+        -:  181:            // Inform the client
+        3:  182:            response = "Graph and MST are ready.\n";
+        3:  183:            send(client_sock, response.c_str(), response.length(), 0);
+        3:  184:        }
+        -:  185:
+        -:  186:        // Present the list of operations
+       15:  187:        response = "Please choose an operation:\n";
+       15:  188:        response += "1. Total weight of the MST\n";
+       15:  189:        response += "2. Longest distance between two vertices\n";
+       15:  190:        response += "3. Average distance between any two vertices in the MST\n";
+       15:  191:        response += "4. Shortest distance between two vertices\n";
+       15:  192:        response += "5. Add edge\n";
+       15:  193:        response += "6. Remove edge\n";
+       15:  194:        response += "7. New graph\n";
+       15:  195:        response += "Enter the number of the operation:\n";
+       15:  196:        send(client_sock, response.c_str(), response.length(), 0);
+        -:  197:
+        -:  198:        // Wait for client's response
+       15:  199:        cmd = recv_line(client_sock);
+       15:  200:        if (cmd.empty()) {
+        1:  201:            close(client_sock);
+        1:  202:            return;
+        -:  203:        }
+        -:  204:        // Remove carriage return and newline characters
+       14:  205:        cmd.erase(std::remove_if(cmd.begin(), cmd.end(),
+      28*:  206:            [](unsigned char x){ return x == '\r' || x == '\n'; }), cmd.end());
+        -:  207:
+       14:  208:        int operation = std::stoi(cmd);
+        -:  209:
+       14:  210:        if (operation == 1) {
+        -:  211:            // Total weight of MST
+       2*:  212:            ao.send([client_sock, &response, graph, mstType]() mutable {
+        2:  213:                auto mstSolver = MSTFactory::createMST(mstType, *graph);
+        2:  214:                if (mstSolver) {
+        2:  215:                    mstSolver->solve(); // Ensure MST is calculated
+        2:  216:                    int weight = mstSolver->getMSTWeight();
+        2:  217:                    response = "Total weight of MST: " + std::to_string(weight) + "\n";
+        -:  218:                } else {
+    #####:  219:                    response = "MST algorithm not set or invalid.\n";
+        -:  220:                }
+        -:  221:                // Send the result before showing the menu again
+        2:  222:                send(client_sock, response.c_str(), response.length(), 0);
+        2:  223:            });
+       12:  224:        } else if (operation == 2) {
+        -:  225:            // Longest distance between two vertices
+       2*:  226:            ao.send([client_sock, &response, graph, mstType]() mutable {
+        2:  227:                auto mstSolver = MSTFactory::createMST(mstType, *graph);
+        2:  228:                if (mstSolver) {
+        2:  229:                    mstSolver->solve(); // Ensure MST is calculated
+        2:  230:                    int diameter = mstSolver->getDiameter();
+        2:  231:                    response = "Longest distance in MST: " + std::to_string(diameter) + "\n";
+        -:  232:                } else {
+    #####:  233:                    response = "MST algorithm not set or invalid.\n";
+        -:  234:                }
+        -:  235:                // Send the result before showing the menu again
+        2:  236:                send(client_sock, response.c_str(), response.length(), 0);
+        2:  237:            });
+       10:  238:        } else if (operation == 3) {
+        -:  239:            // Average distance between any two vertices in the MST
+       2*:  240:            ao.send([client_sock, &response, graph, mstType]() mutable {
+        2:  241:                auto mstSolver = MSTFactory::createMST(mstType, *graph);
+        2:  242:                if (mstSolver) {
+        2:  243:                    mstSolver->solve(); // Ensure MST is calculated
+        2:  244:                    double avg_distance = mstSolver->getAverageDistance();
+        2:  245:                    response = "Average distance in MST: " + std::to_string(avg_distance) + "\n";
+        -:  246:                } else {
+    #####:  247:                    response = "MST algorithm not set or invalid.\n";
+        -:  248:                }
+        -:  249:                // Send the result before showing the menu again
+        2:  250:                send(client_sock, response.c_str(), response.length(), 0);
+        2:  251:            });
+        8:  252:        } else if (operation == 4) {
+        -:  253:            // Shortest distance between two vertices Xi, Xj
+        3:  254:            response = "Enter two vertices Xi and Xj:\n";
+        3:  255:            send(client_sock, response.c_str(), response.length(), 0);
+        -:  256:
+        3:  257:            std::string input_cmd = recv_line(client_sock);
+        3:  258:            if (input_cmd.empty()) {
+        1:  259:                close(client_sock);
+        1:  260:                return;
+        -:  261:            }
+        -:  262:            // Remove carriage return and newline characters
+        2:  263:            input_cmd.erase(std::remove_if(input_cmd.begin(), input_cmd.end(),
+       8*:  264:                [](unsigned char x){ return x == '\r' || x == '\n'; }), input_cmd.end());
+        -:  265:            // Replace commas with spaces
+        2:  266:            std::replace(input_cmd.begin(), input_cmd.end(), ',', ' ');
+        -:  267:
+        2:  268:            std::stringstream input_ss(input_cmd);
+        -:  269:            int xi, xj;
+        2:  270:            input_ss >> xi >> xj;
+        -:  271:
+       2*:  272:            ao.send([xi, xj, client_sock, &response, graph, mstType]() mutable {
+        2:  273:                auto mstSolver = MSTFactory::createMST(mstType, *graph);
+        2:  274:                if (mstSolver) {
+        2:  275:                    mstSolver->solve(); // Ensure MST is calculated
+        2:  276:                    int shortest_distance = mstSolver->getShortestDistance(xi - 1, xj - 1);
+        2:  277:                    response = "Shortest distance between " + std::to_string(xi) + " and " + std::to_string(xj) + " in MST: " + std::to_string(shortest_distance) + "\n";
+        -:  278:                } else {
+    #####:  279:                    response = "MST algorithm not set or invalid.\n";
+        -:  280:                }
+        -:  281:                // Send the result before showing the menu again
+        2:  282:                send(client_sock, response.c_str(), response.length(), 0);
+        2:  283:            });
+        8:  284:        } else if (operation == 5) {
+        -:  285:            // Add edge
+        2:  286:            response = "Enter the edge to add (format: u v weight):\n";
+        2:  287:            send(client_sock, response.c_str(), response.length(), 0);
+        -:  288:
+        2:  289:            std::string edge_cmd = recv_line(client_sock);
+        2:  290:            if (edge_cmd.empty()) {
+        1:  291:                close(client_sock);
+        1:  292:                return;
+        -:  293:            }
+        -:  294:            // Remove carriage return and newline characters
+        1:  295:            edge_cmd.erase(std::remove_if(edge_cmd.begin(), edge_cmd.end(),
+       6*:  296:                [](unsigned char x){ return x == '\r' || x == '\n'; }), edge_cmd.end());
+        -:  297:            // Replace commas with spaces
+        1:  298:            std::replace(edge_cmd.begin(), edge_cmd.end(), ',', ' ');
+        -:  299:
+        1:  300:            std::stringstream edge_ss(edge_cmd);
+        -:  301:            int u, v_edge, w;
+        1:  302:            edge_ss >> u >> v_edge >> w;
+        -:  303:
+       1*:  304:            ao.send([u, v_edge, w, client_sock, &response, graph, mstType]() mutable {
+        1:  305:                graph->newEdge(u, v_edge, w);
+        -:  306:                // Recompute MST
+        1:  307:                auto mstSolver = MSTFactory::createMST(mstType, *graph);
+        1:  308:                if (mstSolver) {
+        1:  309:                    mstSolver->solve(); // Ensure MST is calculated
+        1:  310:                    response = "Edge added and MST updated successfully.\n";
+        -:  311:                } else {
+    #####:  312:                    response = "Failed to update MST.\n";
+        -:  313:                }
+        -:  314:                // Send the result before showing the menu again
+        1:  315:                send(client_sock, response.c_str(), response.length(), 0);
+        1:  316:            });
+        -:  317:
+        -:  318:            // Wait a moment for the edge to be added and MST updated
+        1:  319:            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        -:  320:
+        5:  321:        } else if (operation == 6) {
+        -:  322:            // Remove edge
+        2:  323:            response = "Enter the edge to remove (format: u v):\n";
+        2:  324:            send(client_sock, response.c_str(), response.length(), 0);
+        -:  325:
+        2:  326:            std::string edge_cmd = recv_line(client_sock);
+        2:  327:            if (edge_cmd.empty()) {
+        1:  328:                close(client_sock);
+        1:  329:                return;
+        -:  330:            }
+        -:  331:            // Remove carriage return and newline characters
+        1:  332:            edge_cmd.erase(std::remove_if(edge_cmd.begin(), edge_cmd.end(),
+       4*:  333:                [](unsigned char x){ return x == '\r' || x == '\n'; }), edge_cmd.end());
+        -:  334:            // Replace commas with spaces
+        1:  335:            std::replace(edge_cmd.begin(), edge_cmd.end(), ',', ' ');
+        -:  336:
+        1:  337:            std::stringstream edge_ss(edge_cmd);
+        -:  338:            int u, v_edge;
+        1:  339:            edge_ss >> u >> v_edge;
+        -:  340:
+       1*:  341:            ao.send([u, v_edge, client_sock, &response, graph, mstType]() mutable {
+        1:  342:                graph->removeEdge(u, v_edge);
+        -:  343:                // Recompute MST
+        1:  344:                auto mstSolver = MSTFactory::createMST(mstType, *graph);
+        1:  345:                if (mstSolver) {
+        1:  346:                    mstSolver->solve(); // Ensure MST is calculated
+        1:  347:                    response = "Edge removed and MST updated successfully.\n";
+        -:  348:                } else {
+    #####:  349:                    response = "Failed to update MST.\n";
+        -:  350:                }
+        -:  351:                // Send the result before showing the menu again
+        1:  352:                send(client_sock, response.c_str(), response.length(), 0);
+        1:  353:            });
+        -:  354:
+        -:  355:            // Wait a moment for the edge to be removed and MST updated
+        1:  356:            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        -:  357:
+        3:  358:        } else if (operation == 7) {
+        -:  359:            // New graph
+        1:  360:            ao.send([&graph]() mutable {
+        -:  361:                // Reset the graph
+        1:  362:                graph->newGraph(0, 0);
+        1:  363:            });
+        -:  364:            // Wait a moment for the graph to be reset
+        1:  365:            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        -:  366:
+        1:  367:            response = "Graph has been reset. Please create a new graph.\n";
+        1:  368:            send(client_sock, response.c_str(), response.length(), 0);
+        1:  369:            continue; // Go back to the beginning to create a new graph
+        1:  370:        } else {
+    #####:  371:            response = "Invalid operation selected.\n";
+    #####:  372:            send(client_sock, response.c_str(), response.length(), 0);
+        -:  373:        }
+        -:  374:
+        -:  375:        // Small delay to ensure the previous operation's response is sent before showing the menu again
+       10:  376:        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        -:  377:
+        -:  378:        // The menu will be presented again in the next iteration
+       11:  379:    }
+        7:  380:}
+        -:  381:
+        5:  382:int main() {
+        -:  383:    int client_fd;
+        -:  384:    struct sockaddr_in server_addr, client_addr;
+        -:  385:    socklen_t addr_size;
+        -:  386:
+        -:  387:    // Register signal handler for SIGTERM and SIGINT
+        5:  388:    signal(SIGTERM, signal_handler);
+        5:  389:    signal(SIGINT, signal_handler); // Handle Ctrl+C gracefully
+        -:  390:
+        5:  391:    listener_fd = socket(AF_INET, SOCK_STREAM, 0);
+        5:  392:    if (listener_fd < 0) {
+    #####:  393:        perror("Socket error");
+    #####:  394:        exit(1);
+        -:  395:    }
+        -:  396:
+        -:  397:    // Set socket options to reuse address and port
+        5:  398:    int opt = 1;
+        5:  399:    setsockopt(listener_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt));
+        -:  400:
+        -:  401:    // Bind
+        5:  402:    server_addr.sin_family = AF_INET;
+        5:  403:    server_addr.sin_port = htons(PORT);
+        5:  404:    server_addr.sin_addr.s_addr = INADDR_ANY;
+        5:  405:    if (bind(listener_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+    #####:  406:        perror("Bind error");
+    #####:  407:        close(listener_fd);
+    #####:  408:        exit(1);
+        -:  409:    }
+        -:  410:
+        -:  411:    // Listen
+        5:  412:    if (listen(listener_fd, 10) < 0) {
+    #####:  413:        perror("Listen error");
+    #####:  414:        close(listener_fd);
+    #####:  415:        exit(1);
+        -:  416:    }
+        -:  417:
+        5:  418:    std::cout << "Server is listening on port " << PORT << std::endl;
+        -:  419:
+        -:  420:    // ThreadPool and ActiveObject
+        5:  421:    ThreadPool threadPool(4);
+        5:  422:    ActiveObject ao;
+        -:  423:
+        -:  424:    while (true) {
+       12:  425:        addr_size = sizeof(client_addr);
+       12:  426:        client_fd = accept(listener_fd, (struct sockaddr*)&client_addr, &addr_size);
+      12*:  427:        if (client_fd < 0) {
+        5:  428:            if (listener_fd == -1) {
+        -:  429:                // Listener socket was closed by signal handler, exit the loop
+        5:  430:                break;
+        -:  431:            }
+    #####:  432:            perror("Accept error");
+    #####:  433:            continue;
+        -:  434:        }
+        -:  435:        {
+        7:  436:            std::lock_guard<std::mutex> lock(cout_mutex);
+        7:  437:            std::cout << "Accepted connection from " << inet_ntoa(client_addr.sin_addr) << std::endl;
+        7:  438:        }
+        7:  439:        threadPool.enqueue([client_fd, &ao]() {
+        7:  440:            handle_client(client_fd, ao);
+        7:  441:        });
+        7:  442:    }
+        -:  443:
+        -:  444:    // Server is shutting down
+        -:  445:    {
+        5:  446:        std::lock_guard<std::mutex> lock(cout_mutex);
+        5:  447:        std::cout << "Server is shutting down..." << std::endl;
+        5:  448:    }
+        5:  449:    Graph::destroyInstance();
+        5:  450:    return 0;
+        5:  451:}
