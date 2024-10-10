@@ -44,7 +44,7 @@ Build the project:
 
 bash
 
-make all
+    make all
 
 Run the server:
 
@@ -60,7 +60,7 @@ Example Commands
     Choose MST Algorithm:
         Clients can select between Prim's or Kruskal's MST algorithm:
 
-        bash
+bash
 
     kruskal
     prim
@@ -69,7 +69,7 @@ Graph Input:
 
     Specify the number of vertices and edges:
 
-    bash
+bash
 
 5 7
 
